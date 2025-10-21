@@ -9,7 +9,7 @@ experiment:
 
 
 model:
-    pretrained_model: "hendrydong/model-200m" # absolute path of your model
+    pretrained_model: "hendrydong/model-475m" # absolute path of your model
     optimized_name: "optimized" # the output name for your optimized model, will be saved under sft_sdar/trado
 
 
