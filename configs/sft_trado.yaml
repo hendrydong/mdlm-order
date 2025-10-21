@@ -16,7 +16,7 @@ model:
 
 # sft dataset
 dataset:
-    optimization_data: " data/sft_openr1math_sdar.json" # "sft_openr1math_trado"
+    optimization_data: "sft_openr1math_sdar" # "sft_openr1math_trado"
 
 training:
     gradient_checkpointing_enable: True # if the sequence is very larger, set as True
