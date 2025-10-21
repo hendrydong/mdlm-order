@@ -25,7 +25,7 @@ training:
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086
-    num_train_epochs: 1
+    num_train_epochs: 1000
     max_grad_norm: 1
     method: "semi-ar" # "semi-ar""trace"
     lower_p: 0.1
