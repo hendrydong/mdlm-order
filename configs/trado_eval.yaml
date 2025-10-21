@@ -6,7 +6,7 @@ experiment:
 
 
 
-model: "/abs/path/of/model" # absolute path of your model
+model: "Gen-Verse/TraDo-8B-Instruct" # absolute path of your model
 model_base: "trado" 
 
 
