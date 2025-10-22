@@ -514,7 +514,7 @@ def main():
         # 先复制你的 block 规则得到 base add-bias
         
         # 复制基础块规则
-        attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(extended_input_ids.dtype)
+        attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(base_bias.dtype)
         # 与分段可见性交集
         same_seg = extended_segment_ids.unsqueeze(-1).eq(extended_segment_ids.unsqueeze(-2)).unsqueeze(1)
         attn_bias = attn_bias.masked_fill(~same_seg, float("-inf"))
