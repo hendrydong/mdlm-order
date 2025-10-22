@@ -81,6 +81,8 @@ def main():
     # SETUP Accelerator     #
     #########################
     config = get_config()
+    
+    print(config)
 
     project_name = config.experiment.project
     if config.experiment.current_epoch == 1:

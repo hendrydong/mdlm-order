@@ -76,6 +76,8 @@ def main():
     #########################
     config = get_config()
 
+    print(config)
+
     project_name = config.experiment.project
     pretrained_model = config.model.pretrained_model
 
