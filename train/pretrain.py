@@ -74,16 +74,31 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
         ids_list = out["input_ids"]
         if add_eos:
             ids_list = [ids + [eos_id] for ids in ids_list]
-        return {"input_ids": ids_list}
+        # 为每条样本分配一个 doc 段号，整条样本同一段号
+        seg_list = [ [i] * len(ids) for i, ids in enumerate(ids_list) ]
+        return {"input_ids": ids_list, "segment_ids": seg_list}
 
     tokenized = ds.map(tok_fn, batched=True, remove_columns=ds.column_names)
+
+    # 展平为长序列，同时展平段号
     all_ids = list(chain.from_iterable(tokenized["input_ids"]))
+    all_segs = list(chain.from_iterable(tokenized["segment_ids"]))
+
     total_len = (len(all_ids) // chunk_size) * chunk_size
     if total_len == 0:
         raise ValueError("No chunk formed. Decrease chunk_size or increase data")
-    all_ids = all_ids[:total_len]
-    chunks = [all_ids[i:i + chunk_size] for i in range(0, total_len, chunk_size)]
-    return Dataset.from_dict({"input_ids": chunks})
+
+    all_ids  = all_ids[:total_len]
+    all_segs = all_segs[:total_len]
+
+    chunks_ids  = [all_ids[i:i + chunk_size]  for i in range(0, total_len, chunk_size)]
+    chunks_segs = [all_segs[i:i + chunk_size] for i in range(0, total_len, chunk_size)]
+
+    return Dataset.from_dict({
+        "input_ids": chunks_ids,
+        "segment_ids": chunks_segs,   # 新增
+    })
+
 
 
 def make_basic_block_attention_additive(N: int, start_pos: int, block_size: int, device=None, dtype=torch.float32):
@@ -190,7 +205,37 @@ def one_round_vectorized(input_ids_b, step_map_b, L0, L1, block_size, mask_id):
     return extended_input_ids_b, pmask_b, new_step_map_b, True
 
 
-def collect_training_data(input_ids, step_map_list, start_pos, mask_id, pad_id, config):
+def segment_positions_from_segids(seg_ids: torch.LongTensor) -> torch.LongTensor:
+    """
+    seg_ids: [B, L]，同一个原文档段号相同且连续（拼接时的做法）
+    返回 pos: [B, L]，每个段内从 0 递增，到下一个段重置为 0
+    """
+    B, L = seg_ids.shape
+    pos = torch.zeros_like(seg_ids)
+    # 简洁做法：找段边界 + 累积计数，但要在边界处重置
+    # 这里用一个简洁的 for 循环，B 通常不大，且 L 是 chunk_size，性能足够
+    for b in range(B):
+        s = seg_ids[b]
+        p = pos[b]
+        p[0] = 0
+        for i in range(1, L):
+            if s[i] == s[i-1]:
+                p[i] = p[i-1] + 1
+            else:
+                p[i] = 0
+    return pos  # [B, L]
+
+
+def collect_training_data(
+    input_ids,              # [B, L]
+    step_map_list,          # list(len B) of list[int] (len L)
+    start_pos,              # 预训练=0
+    mask_id,
+    pad_id,
+    config,
+    segment_ids=None,       # [B, L] LongTensor，必传以便分段位置
+):
+    assert segment_ids is not None, "segment_ids 不能为空；packing 时需要用于位置重置"
     B, L = input_ids.shape
     L0 = start_pos
     L1 = L - L0
@@ -199,26 +244,32 @@ def collect_training_data(input_ids, step_map_list, start_pos, mask_id, pad_id, 
     lower = config.training.lower_p
     upper = config.training.upper_p
 
+    extended_input_ids_list = []
+    pmask_list = []
+    seg_kept_list = []   # 每条扩展样本左半段对应的 segment_ids（用于生成扩展段 seg）
+    # -------- semi-ar --------
     if config.training.method == "semi-ar":
-        extended_input_ids_list, pmask_list = [], []
         for b in range(B):
-            prob_ramp = torch.empty(L1, device=input_ids.device).uniform_(lower, upper)
-            rand_tail = torch.rand(L1, device=input_ids.device)
+            prob_ramp  = torch.empty(L1, device=input_ids.device).uniform_(lower, upper)
+            rand_tail  = torch.rand(L1, device=input_ids.device)
             pmask_tail = rand_tail <= prob_ramp
 
             pmask_b = torch.cat([
                 torch.zeros(L0, dtype=torch.bool, device=input_ids.device),
                 pmask_tail
-            ], dim=0)
+            ], dim=0)  # [L0+L1]==[L]
 
             noise_tail = input_ids[b, L0:].clone()
             noise_tail.masked_fill_(pmask_tail, mask_id)
-            extended_b = torch.cat([input_ids[b], noise_tail], dim=0)
+            extended_b = torch.cat([input_ids[b], noise_tail], dim=0)  # [2L]
 
             extended_input_ids_list.append(extended_b)
             pmask_list.append(pmask_b)
+            seg_kept_list.append(segment_ids[b])  # 记录下这条样本的段号
 
+    # -------- trace --------
     elif config.training.method == "trace":
+        # 预处理 step_map
         for b in range(B):
             step_map_i = step_map_list[b]
             for j in range(int((L1 - 1) / block_size) + 1):
@@ -229,7 +280,6 @@ def collect_training_data(input_ids, step_map_list, start_pos, mask_id, pad_id, 
         step_map = torch.as_tensor(step_map_list, dtype=torch.long, device=input_ids.device)
         assert step_map.shape[1] == L1
 
-        extended_input_ids_list, pmask_list = [], []
         for b in range(B):
             step_b = step_map[b]
             while True:
@@ -246,35 +296,46 @@ def collect_training_data(input_ids, step_map_list, start_pos, mask_id, pad_id, 
                     break
                 extended_input_ids_list.append(extended_b)
                 pmask_list.append(pmask_b)
+                seg_kept_list.append(segment_ids[b])  # 同一左半段可能生成多条扩展，段号一致
     else:
         raise ValueError(f"Unknown training.method: {config.training.method}")
 
-    extended_input_ids = torch.stack(extended_input_ids_list, dim=0)
-    p_mask = torch.stack(pmask_list, dim=0).to(torch.bool)
+    # 堆叠
+    extended_input_ids = torch.stack(extended_input_ids_list, dim=0)  # [B_eff, 2L]
+    p_mask             = torch.stack(pmask_list, dim=0).to(torch.bool)  # [B_eff, L]
+    seg_left           = torch.stack(seg_kept_list, dim=0)  # [B_eff, L]（左半段的段号）
 
-    # 截断 pad 的 post 区
-    pad_resp = (extended_input_ids[:, :L] == pad_id) & p_mask
-    post_num = config.training.post_num
-    if post_num is not None:
-        cum_pad = torch.cumsum(pad_resp.int(), dim=1)
-        p_mask &= ~(pad_resp & (cum_pad > post_num))
-
+    # —— 生成 labels（只监督左半段）——
     labels = extended_input_ids[:, :L].clone()
 
-    idx = torch.arange(L, device=input_ids.device).unsqueeze(0).expand(extended_input_ids.shape[0], -1)
-    valid = (idx >= start_pos) | extended_input_ids[:, :L].ne(pad_id)
-    tok_idx = valid.long().cumsum(dim=-1) - 1
-    tok_idx = tok_idx.masked_fill(~valid, 1)
-    tok_idx_resp = tok_idx[:, start_pos:]
-    tok_idx_ext  = torch.cat([tok_idx, tok_idx_resp], dim=1)
+    # —— 基于 segment 计算 position ids —— 
+    # 左半段按段重置；右半段沿用左半段 tail（不跨文档连续累加）
+    pos_left = segment_positions_from_segids(seg_left)                # [B_eff, L]
+    pos_tail = pos_left[:, L0:]                                       # [B_eff, L1]
+    tok_idx_ext = torch.cat([pos_left, pos_tail], dim=1)              # [B_eff, 2L]
 
-    keep = p_mask.view(p_mask.size(0), -1).any(dim=1)
+    # （可选）如需对 pad 做处理：如果你的打包没有 pad 可忽略
+    if pad_id is not None:
+        # 若左半段某 token 是 pad，则其位置可设为 0（或 -1，视模型实现）
+        pad_mask_left = (extended_input_ids[:, :L] == pad_id)
+        tok_idx_ext[:, :L][pad_mask_left] = 0
+        # 右半段对应 tail 部分如果有 pad（通常没有），同样置 0
+        pad_mask_tail = (extended_input_ids[:, L:] == pad_id)
+        tok_idx_ext[:, L:][pad_mask_tail] = 0
+
+    # —— 过滤掉没有监督位置的样本（与你原逻辑一致）——
+    keep = p_mask.view(p_mask.size(0), -1).any(dim=1)                 # [B_eff]
     extended_input_ids = extended_input_ids[keep]
     p_mask            = p_mask[keep]
     tok_idx_ext       = tok_idx_ext[keep]
     labels            = labels[keep]
+    seg_left          = seg_left[keep]                                 # 方便外面若还需要
 
-    return extended_input_ids, p_mask, tok_idx_ext, labels
+    # （可选）把扩展段的 seg 也返回，便于在外面构造跨段屏蔽 same_seg
+    extended_segment_ids = torch.cat([seg_left, seg_left], dim=1)      # [B_eff, 2L]
+
+    return extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids
+
 
 
 # -------------------------------
@@ -420,36 +481,65 @@ def main():
     need_step = (config.training.method == "trace")
 
     def collate_build_batch(batch):
-        # batch: list of dict with "input_ids" list[int] of length L1
-        input_ids = torch.tensor([ex["input_ids"] for ex in batch], dtype=torch.long, device=accelerator.device)  # [B,L1]
+        # batch: list of {"input_ids": [L], "segment_ids": [L]}
+        input_ids = torch.tensor([ex["input_ids"] for ex in batch],
+                                dtype=torch.long, device=accelerator.device)    # [B, L]
+        seg_ids   = torch.tensor([ex["segment_ids"] for ex in batch],
+                                dtype=torch.long, device=accelerator.device)    # [B, L]
 
-        if need_step:
+        # step_map（trace 需要，semi-ar 也可用线性占位）
+        if config.training.method == "trace":
             step_map_list = [list(range(input_ids.size(1))) for _ in range(input_ids.size(0))]
         else:
             step_map_list = [list(range(input_ids.size(1))) for _ in range(input_ids.size(0))]
 
         with torch.no_grad():
-            extended_input_ids, p_mask, tok_idx_ext, labels = collect_training_data(
+            extended_input_ids, p_mask, tok_idx_ext, labels, extended_segment_ids = collect_training_data(
                 input_ids=input_ids,
                 step_map_list=step_map_list,
-                start_pos=start_pos,
+                start_pos=0,
                 mask_id=mask_id,
                 pad_id=pad_id,
-                config=config
+                config=config,
+                segment_ids=seg_ids,
             )
-        # 注意：collect_training_data 可能因为 keep 过滤导致 batch size 变化
-        # base_bias 复制到当前 batch
+
+        # 因为 collect_training_data 可能过滤（keep），所以要同步筛选 seg_ids
+        # keep 的逻辑是按 p_mask 的任意 True 行保留。我们重建一个 keep 掩码：
+        # 这里等价：每条样本至少产生了一条 extended；如果你担心不一致，可返回 keep 从函数里带出。
         B_eff = extended_input_ids.size(0)
-        attn_bias = base_bias.repeat(B_eff, 1, 1, 1)
-        attn_bias = process_pad_additive(attn_bias, extended_input_ids, pad_id, start_pos)
+        # seg_ids 扩展到 [L | L]，右半段与左半段同段号
+        # seg_ext = torch.cat([seg_ids[:B_eff], seg_ids[:B_eff]], dim=1)        # [B_eff, N]
+
+        # 先复制你的 block 规则得到 base add-bias
+        
+        # 复制基础块规则
+        attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(extended_input_ids.dtype)
+        # 与分段可见性交集
+        same_seg = extended_segment_ids.unsqueeze(-1).eq(extended_segment_ids.unsqueeze(-2)).unsqueeze(1)
+        attn_bias = attn_bias.masked_fill(~same_seg, float("-inf"))
+        # pad 列屏蔽 & 自环修复
+        attn_bias = process_pad_additive(attn_bias, extended_input_ids, pad_id, start_pos=0)
+        
+        # attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(extended_input_ids.dtype)
+
+        # # 叠加 segment 隔离：同段可见，不同段禁用
+        # # same_seg: [B, N, N]
+        # same_seg = seg_ext.unsqueeze(-1).eq(seg_ext.unsqueeze(-2))
+        # same_seg = same_seg.unsqueeze(1)                                         # [B,1,N,N]
+        # attn_bias = attn_bias.masked_fill(~same_seg, float("-inf"))
+
+        # # 处理 pad 列
+        # attn_bias = process_pad_additive(attn_bias, extended_input_ids, pad_id, start_pos=0)
 
         return {
             "extended_input_ids": extended_input_ids,   # [B_eff, N]
-            "p_mask": p_mask,                           # [B_eff, L1]
+            "p_mask": p_mask,                           # [B_eff, L]
             "tok_idx_ext": tok_idx_ext,                 # [B_eff, N]
-            "labels": labels,                           # [B_eff, L1]
+            "labels": labels,                           # [B_eff, L]
             "attn_bias": attn_bias,                     # [B_eff,1,N,N]
         }
+
 
     # dataloader
     train_dataloader_lm = DataLoader(
