@@ -422,35 +422,6 @@ def main():
 
         lower = config.training.lower_p
         upper = config.training.upper_p
-
-
-        '''
-        if config.training.method == "semi-ar":
-
-            extended_input_ids_list, pmask_list = [], []
-            
-            
-            for b in range(B):
-
-                extended_input_ids_b = input_ids[b]
-                pmask_b = torch.zeros(start_pos, dtype=torch.bool)
-                
-                for j in range(int((L1 - 1) / block_size) + 1):
-
-                    start = j * block_size
-                    end = min(L1, (j + 1) * block_size)
-
-                    pmask_b_j = torch.rand(end - start) <= torch.empty(end - start).uniform_(lower, upper)
-                    #pmask_b_j = torch.rand(end - start) <= torch.linspace(lower, upper, steps=end - start)
-                    pmask_b = torch.cat([pmask_b, pmask_b_j], dim=0)
-
-                    noise_b_j = input_ids[b, (L0 + start):(L0 + end)].clone()
-                    noise_b_j = noise_b_j.masked_fill_(pmask_b_j, mask_id)
-
-                    extended_input_ids_b = torch.cat([extended_input_ids_b, noise_b_j], dim=0)
-                
-                extended_input_ids_list.append(extended_input_ids_b)
-                pmask_list.append(pmask_b)'''
         
         if config.training.method == "semi-ar":
 
@@ -606,50 +577,6 @@ def main():
     end = time.time()
 
     import torch.nn.functional as F
-
-
-
-
-
-
-    
-
-    ''' To be updated
-    def forward_process(extended_input_ids, p_mask, tok_idx_ext, labels):
-
-        B, L = p_mask.shape
-        L0    = start_pos
-        L1    = L - L0
-        device = extended_input_ids.device
-
-        attention_mask = basic_block_attention.clone()
-        attention_mask = attention_mask.repeat_interleave(B, dim=0).to(device)
-        attention_mask = process_pad(attention_mask, extended_input_ids)
-
-        labels_trim = labels[:, L0:].clone()                             # (B, L1)
-        resp_keep   = p_mask[:, L0:]                                        # (B, L1) True=训练
-        labels_trim[~resp_keep] = -100   
-
-        out = model(
-            input_ids      = extended_input_ids,
-            attention_mask = attention_mask,
-            position_ids   = tok_idx_ext,
-            labels         = labels_trim,    # 注意：这里与 logits_to_keep 对齐
-            logits_to_keep = L1,             # 关键：只算最后 L1 个 time steps
-            return_dict    = True,
-            use_cache      = False,
-        )
-
-        loss_lm = out.loss
-
-
-        tokens_kept = (labels_trim != -100).sum()
-        if tokens_kept > 0:
-            loss_lm = loss_lm * (tokens_kept.to(loss_lm.dtype) / B)
-
-        
-        return loss_lm
-    '''
     
 
     def forward_process(extended_input_ids, p_mask, tok_idx_ext, labels):
@@ -831,19 +758,6 @@ def save_checkpoint(model, tokenizer, config, accelerator, name):
 
         logger.info(f"Saved model + tokenizer to {save_dir}")
     
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 if __name__ == "__main__":
