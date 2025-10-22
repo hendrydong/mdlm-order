@@ -681,6 +681,8 @@ def main():
 
     from tqdm.auto import tqdm
 
+    step_full = 0
+
     for epoch in range(first_epoch, num_train_epochs):
         
         model.train()
@@ -711,11 +713,20 @@ def main():
                     tok_idx_ext=tok_idx_ext,
                     labels=labels
                 )
-            if step < 10:
-                print(loss_lm)
-            
-            
+            #if step < 10:
+            #    print(loss_lm)
+
             accelerator.backward(loss_lm)
+
+            accelerator.log(
+                {
+                    "train/loss_lm": loss_lm.detach().item(),
+                    "train/lr": lr_scheduler.get_last_lr()[0],
+                    "train/step_global": step_full,
+                    "train/epoch": epoch+step / len(progress_bar),
+                },
+                step=step_full,
+            )
 
             if (step + 1) % accelerator.gradient_accumulation_steps == 0:
                 if config.training.max_grad_norm is not None:
@@ -727,6 +738,7 @@ def main():
 
                 torch.cuda.empty_cache()
             
+            step_full += 1
 
                 
 
