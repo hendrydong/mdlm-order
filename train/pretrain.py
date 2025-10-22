@@ -494,7 +494,7 @@ def main():
             step_map_list = [list(range(input_ids.size(1))) for _ in range(input_ids.size(0))]
 
         with torch.no_grad():
-            extended_input_ids, p_mask, tok_idx_ext, labels, extended_segment_ids = collect_training_data(
+            extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids = collect_training_data(
                 input_ids=input_ids,
                 step_map_list=step_map_list,
                 start_pos=0,
