@@ -393,7 +393,7 @@ def main():
     # dataset
     import datasets as hfds
     raw_ds = hfds.load_dataset("hendrydong/fineweb-edu-10BT", split="val")
-    chunk_size = config.data.chunk_size
+    chunk_size = config.training.chunk_size
     packed_ds  = prepare_pretrain_packed_concat(
         ds=raw_ds,
         tokenizer=tokenizer,
