@@ -37,7 +37,7 @@ training:
     max_gen_length: 2000
     max_prompt_len: 784
     chunk_size: 4096
-    save_steps: 100
+    save_steps: 1000
 
 
 
