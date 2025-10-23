@@ -4,7 +4,7 @@ wandb:
 
 
 experiment:
-    project: "pretrain" # need to be same of this file name 
+    project: "pretrain-1023" # need to be same of this file name 
     num_node: 1 # the number of machines you have
     name: "baseline"
 
