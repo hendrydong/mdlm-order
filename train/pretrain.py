@@ -190,7 +190,7 @@ def make_basic_block_attention_additive(N: int, start_pos: int, block_size: int,
                 allow[:, :, block_rows.unsqueeze(-1), 0:row_end] = True
 
     bias = torch.zeros_like(allow, dtype=dtype)
-    bias[~allow] = 1
+    bias[allow] = 1
     return bias  # [1,1,N,N]
 
 
