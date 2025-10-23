@@ -3,6 +3,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+
+from tqdm from tqdm
 import json
 import logging
 import math
@@ -80,21 +82,35 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
         seg_list = [ [i] * len(ids) for i, ids in enumerate(ids_list) ]
         return {"input_ids": ids_list, "segment_ids": seg_list}
 
-    tokenized = ds.map(tok_fn, batched=True, remove_columns=ds.column_names, num_proc=64, batch_size=1000)
+    tokenized = ds.map(tok_fn, batched=True, remove_columns=ds.column_names, num_proc=128, batch_size=1000)
 
-    # 展平为长序列，同时展平段号
-    all_ids = list(chain.from_iterable(tokenized["input_ids"]))
-    all_segs = list(chain.from_iterable(tokenized["segment_ids"]))
-
-    total_len = (len(all_ids) // chunk_size) * chunk_size
-    if total_len == 0:
+    # 使用生成器分批处理，避免一次性加载所有数据到内存
+    
+    def chunk_generator():
+        buffer_ids = []
+        buffer_segs = []
+        
+        for item in tqdm(tokenized, desc="Processing chunks", unit="docs"):
+            buffer_ids.extend(item["input_ids"])
+            buffer_segs.extend(item["segment_ids"])
+            
+            # 当缓冲区足够大时，yield chunks
+            while len(buffer_ids) >= chunk_size:
+                yield {
+                    "input_ids": buffer_ids[:chunk_size],
+                    "segment_ids": buffer_segs[:chunk_size]
+                }
+                buffer_ids = buffer_ids[chunk_size:]
+                buffer_segs = buffer_segs[chunk_size:]
+    
+    # 收集所有 chunks（如果内存允许）或直接返回生成器
+    chunks = list(tqdm(chunk_generator(), desc="Collecting chunks", unit="chunks"))
+    
+    if len(chunks) == 0:
         raise ValueError("No chunk formed. Decrease chunk_size or increase data")
-
-    all_ids  = all_ids[:total_len]
-    all_segs = all_segs[:total_len]
-
-    chunks_ids  = [all_ids[i:i + chunk_size]  for i in range(0, total_len, chunk_size)]
-    chunks_segs = [all_segs[i:i + chunk_size] for i in range(0, total_len, chunk_size)]
+    
+    chunks_ids = [c["input_ids"] for c in chunks]
+    chunks_segs = [c["segment_ids"] for c in chunks]
 
     return Dataset.from_dict({
         "input_ids": chunks_ids,
@@ -773,6 +789,7 @@ def save_checkpoint(model, tokenizer, config, accelerator, name):
             for modname in modules:
                 try:
                     import importlib, inspect, glob, os
+
                     mod = importlib.import_module(modname)
                     src_file = inspect.getsourcefile(mod)
                     if not src_file or not os.path.exists(src_file):
