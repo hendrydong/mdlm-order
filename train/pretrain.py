@@ -109,14 +109,25 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
     if len(chunks) == 0:
         raise ValueError("No chunk formed. Decrease chunk_size or increase data")
     
-    chunks_ids = [c["input_ids"] for c in chunks]
-    chunks_segs = [c["segment_ids"] for c in chunks]
-
-    return Dataset.from_dict({
-        "input_ids": chunks_ids,
-        "segment_ids": chunks_segs,   # 新增
-    })
-
+    # 使用 Dataset 的流式处理，避免一次性加载所有 chunks 到内存
+    def chunks_gen():
+        buffer_ids = []
+        buffer_segs = []
+        
+        for item in tqdm(tokenized, desc="Processing chunks", unit="docs"):
+            buffer_ids.extend(item["input_ids"])
+            buffer_segs.extend(item["segment_ids"])
+            
+            while len(buffer_ids) >= chunk_size:
+                yield {
+                    "input_ids": buffer_ids[:chunk_size],
+                    "segment_ids": buffer_segs[:chunk_size]
+                }
+                buffer_ids = buffer_ids[chunk_size:]
+                buffer_segs = buffer_segs[chunk_size:]
+    
+    # 直接从生成器创建 Dataset，使用迭代方式避免内存峰值
+    return Dataset.from_generator(chunks_gen)
 
 
 def make_basic_block_attention_additive(N: int, start_pos: int, block_size: int, device=None, dtype=torch.float32):
