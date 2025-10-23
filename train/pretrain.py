@@ -103,7 +103,7 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
 
 def make_basic_block_attention_additive(N: int, start_pos: int, block_size: int, device=None, dtype=torch.float32):
     """
-    返回加性 bias: [1,1,N,N]，允许=0 禁止=-inf
+    返回加性 bias: [1,1,N,N]，允许=1 禁止=0
     约定 N = L0 + 2*L1
     """
     B = 1
@@ -142,7 +142,7 @@ def make_basic_block_attention_additive(N: int, start_pos: int, block_size: int,
                 allow[:, :, block_rows.unsqueeze(-1), 0:row_end] = True
 
     bias = torch.zeros_like(allow, dtype=dtype)
-    bias[~allow] = float("-inf")
+    bias[~allow] = 1
     return bias  # [1,1,N,N]
 
 
@@ -157,7 +157,7 @@ def process_pad_additive(additive_bias, input_ids, pad_id, start_pos):
     additive_bias = additive_bias.to(device)
 
     key_is_pad = (input_ids == pad_id)  # [B,N]
-    additive_bias.masked_fill_(key_is_pad[:, None, None, :], float("-inf"))
+    additive_bias.masked_fill_(key_is_pad[:, None, None, :], 0)
 
     A = additive_bias[:, 0]  # [B,N,N]
     all_neg_inf = torch.isneginf(A).all(dim=-1)  # [B,N]
@@ -517,7 +517,7 @@ def main():
         attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(base_bias.dtype)
         # 与分段可见性交集
         same_seg = extended_segment_ids.unsqueeze(-1).eq(extended_segment_ids.unsqueeze(-2)).unsqueeze(1)
-        attn_bias = attn_bias.masked_fill(~same_seg, float("-inf"))
+        attn_bias = attn_bias.masked_fill(~same_seg, 0)
         # pad 列屏蔽 & 自环修复
         attn_bias = process_pad_additive(attn_bias, extended_input_ids, pad_id, start_pos=0)
         
