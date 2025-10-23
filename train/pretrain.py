@@ -453,10 +453,17 @@ def main():
 
     # dataset
     import datasets as hfds
-    raw_ds = hfds.load_dataset("hendrydong/fineweb-edu-10BT", split="val")
+    raw_ds = hfds.load_dataset(config.dataset.optimization_data, split="train")
+    raw_ds_val = hfds.load_dataset(config.dataset.optimization_data, split="val")
     chunk_size = config.training.chunk_size
     packed_ds  = prepare_pretrain_packed_concat(
         ds=raw_ds,
+        tokenizer=tokenizer,
+        chunk_size=chunk_size,
+        add_eos=True
+    )
+    packed_ds_val  = prepare_pretrain_packed_concat(
+        ds=raw_ds_val,
         tokenizer=tokenizer,
         chunk_size=chunk_size,
         add_eos=True
@@ -549,6 +556,14 @@ def main():
         collate_fn=collate_build_batch,
         num_workers=0
     )
+    
+    eval_dataloader_lm = DataLoader(
+        packed_ds_val,
+        batch_size=config.training.batch_size_lm,
+        shuffle=False,
+        collate_fn=collate_build_batch,
+        num_workers=0
+    )
 
     # max steps
     # 每个样本都能至少产生一个扩展条目，这里用近似估计步数
@@ -607,7 +622,7 @@ def main():
 
         log_probs = F.log_softmax(logits, dim=-1)
         logp_tok  = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # [B_eff, L1]
-        loss_lm = - (logp_tok * p_mask).sum(dim=1) / L1
+        loss_lm = - (logp_tok * p_mask).sum(dim=1) / p_mask.sum(dim=1).clamp_min(1)
         loss_lm = loss_lm.mean()
         return loss_lm
 
@@ -640,7 +655,7 @@ def main():
                 step=step_full,
             )
 
-            if (step + 1) % accelerator.gradient_accumulation_steps == 0:
+            if (step_full + 1) % accelerator.gradient_accumulation_steps == 0:
                 if config.training.max_grad_norm is not None:
                     accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
 
@@ -651,6 +666,52 @@ def main():
 
             step_full += 1
             end = time.time()
+            
+            if step_full % config.training.save_steps == 0:
+                print("eval and save checkpoint at step", step_full)
+                model.eval()
+                total_loss = 0.0
+                total_tokens = 0
+                with torch.no_grad():
+                    for eval_batch in eval_dataloader_lm:
+                        extended_input_ids = eval_batch["extended_input_ids"]
+                        p_mask = eval_batch["p_mask"]
+                        tok_idx_ext = eval_batch["tok_idx_ext"]
+                        attn_bias = eval_batch["attn_bias"]
+                        labels = eval_batch["labels"]
+
+                        B_eff, L = p_mask.shape
+                        L0 = start_pos
+                        L1 = L
+
+                        out = model(
+                            input_ids=extended_input_ids,
+                            attention_mask=attn_bias,   # 加性 bias
+                            position_ids=tok_idx_ext
+                        )
+                        logits = out.logits  # [B_eff, N, V]
+                        logits = torch.cat([logits[:, :L0, :], logits[:, L0 + L1:, :]], dim=1)  # [B_eff, L1, V]
+
+                        log_probs = F.log_softmax(logits, dim=-1)
+                        logp_tok  = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # [B_eff, L1]
+                        loss_lm = - (logp_tok * p_mask).sum(dim=1)  # [B_eff]
+                        
+                        total_loss += loss_lm.sum().item()
+                        total_tokens += p_mask.sum().item()
+                avg_loss = total_loss / total_tokens
+                perplexity = math.exp(avg_loss)
+                accelerator.log(
+                    {
+                        "eval/loss_lm": avg_loss,
+                        "eval/perplexity": perplexity,
+                        "eval/step_global": step_full,
+                    },
+                    step=step_full,
+                )
+                
+                accelerator.wait_for_everyone()
+                save_checkpoint(model, tokenizer, config, accelerator, f"step-{step_full}")
+                
 
     accelerator.wait_for_everyone()
     save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name)

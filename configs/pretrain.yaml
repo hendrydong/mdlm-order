@@ -4,7 +4,7 @@ wandb:
 
 
 experiment:
-    project: "sft_my" # need to be same of this file name 
+    project: "pretrain" # need to be same of this file name 
     num_node: 1 # the number of machines you have
 
 
@@ -16,16 +16,16 @@ model:
 
 # sft dataset
 dataset:
-    optimization_data: "sft_openr1math_sdar" # "sft_openr1math_trado"
+    optimization_data: "hendrydong/fineweb-edu-10BT" # "sft_openr1math_trado"
 
 training:
     gradient_checkpointing_enable: True # if the sequence is very larger, set as True
     gradient_accumulation_steps: 16
-    batch_size_lm: 1
+    batch_size_lm: 32
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086
-    num_train_epochs: 1000
+    num_train_epochs: 3
     max_grad_norm: 1
     method: "semi-ar" # "semi-ar""trace"
     lower_p: 0.1
@@ -36,13 +36,14 @@ training:
     max_gen_length: 2000
     max_prompt_len: 784
     chunk_size: 4096
+    save_steps: 100
 
 
 
 optimizer:
     name: adamw
     params: # default adamw params
-        learning_rate: 1e-5
+        learning_rate: 1e-4
         scale_lr: False # scale learning rate by total batch size
         beta1: 0.9
         beta2: 0.999
