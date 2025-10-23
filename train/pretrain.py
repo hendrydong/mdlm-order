@@ -454,6 +454,10 @@ def main():
     # dataset
     import datasets as hfds
     raw_ds = hfds.load_dataset(config.dataset.optimization_data, split="train")
+    # shuffle the dataset
+    raw_ds = raw_ds.shuffle(seed=config.training.seed)
+    # select 10% for checking
+    raw_ds = raw_ds.select([i for i in list(range(int(len(raw_ds)*0.1)))])
     raw_ds_val = hfds.load_dataset(config.dataset.optimization_data, split="val")
     chunk_size = config.training.chunk_size
     packed_ds  = prepare_pretrain_packed_concat(
