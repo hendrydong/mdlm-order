@@ -21,8 +21,8 @@ dataset:
 
 training:
     gradient_checkpointing_enable: True # if the sequence is very larger, set as True
-    gradient_accumulation_steps: 16
-    batch_size_lm: 2
+    gradient_accumulation_steps: 32
+    batch_size_lm: 1
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086

@@ -695,7 +695,7 @@ def main():
 
         for step, batch in enumerate(progress_bar, start=1):
             data_time_m.update(time.time() - end)
-
+            model.train()
             # 所有张量已在 collate 放到正确 device
             loss_lm = forward_process(batch)
 
