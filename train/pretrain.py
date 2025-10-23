@@ -47,6 +47,59 @@ logger = get_logger(__name__, log_level="INFO")
 import os 
 os.environ["TOKENIZERS_PARALLELISM"]="false"
 
+from collections import deque
+from typing import Dict, Iterable, Iterator, List, Optional
+
+
+def iter_fixed_chunks(
+    tokenized: Iterable[Dict[str, List[int]]],
+    chunk_size: int,
+    drop_last: bool = True,
+    with_tqdm: bool = True,
+    desc: str = "Processing chunks",
+) -> Iterator[Dict[str, List[int]]]:
+    """
+    按 token 级拼接流式地产生定长 chunk。
+    - 仅单次遍历 tokenized
+    - 用 deque 避免反复切片拷贝
+    - 支持是否丢弃最后不足 chunk_size 的尾块
+    """
+    assert chunk_size > 0, "chunk_size must be positive"
+
+    buf_ids = deque()
+    buf_segs = deque()
+    iterator = tokenized
+    if with_tqdm:
+        iterator = tqdm(iterator, desc=desc, unit="docs")
+
+    for item in iterator:
+        ids = item["input_ids"]
+        segs = item.get("segment_ids", None)
+
+        # 基本健壮性检查
+        if segs is not None and len(ids) != len(segs):
+            raise ValueError("input_ids and segment_ids length mismatch in an item")
+
+        buf_ids.extend(ids)
+        if segs is not None:
+            buf_segs.extend(segs)
+        else:
+            # 若没有 segment_ids，就用 0 填（或改成你需要的规则）
+            buf_segs.extend([0] * len(ids))
+
+        # 够大就吐块：从左侧 popleft，避免拷贝
+        while len(buf_ids) >= chunk_size:
+            out_ids = [buf_ids.popleft() for _ in range(chunk_size)]
+            out_segs = [buf_segs.popleft() for _ in range(chunk_size)]
+            yield {"input_ids": out_ids, "segment_ids": out_segs}
+
+    # 处理尾巴
+    if not drop_last and len(buf_ids) > 0:
+        out_ids = list(buf_ids)
+        out_segs = list(buf_segs)
+        yield {"input_ids": out_ids, "segment_ids": out_segs}
+
+
 # -------------------------------
 # helpers
 # -------------------------------
@@ -85,49 +138,15 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
     tokenized = ds.map(tok_fn, batched=True, remove_columns=ds.column_names, num_proc=128, batch_size=1000)
 
     # 使用生成器分批处理，避免一次性加载所有数据到内存
-    
-    def chunk_generator():
-        buffer_ids = []
-        buffer_segs = []
-        
-        for item in tqdm(tokenized, desc="Processing chunks", unit="docs"):
-            buffer_ids.extend(item["input_ids"])
-            buffer_segs.extend(item["segment_ids"])
-            
-            # 当缓冲区足够大时，yield chunks
-            while len(buffer_ids) >= chunk_size:
-                yield {
-                    "input_ids": buffer_ids[:chunk_size],
-                    "segment_ids": buffer_segs[:chunk_size]
-                }
-                buffer_ids = buffer_ids[chunk_size:]
-                buffer_segs = buffer_segs[chunk_size:]
-    
-    # 收集所有 chunks（如果内存允许）或直接返回生成器
-    chunks = list(tqdm(chunk_generator(), desc="Collecting chunks", unit="chunks"))
-    
-    if len(chunks) == 0:
-        raise ValueError("No chunk formed. Decrease chunk_size or increase data")
-    
-    # 使用 Dataset 的流式处理，避免一次性加载所有 chunks 到内存
-    def chunks_gen():
-        buffer_ids = []
-        buffer_segs = []
-        
-        for item in tqdm(tokenized, desc="Processing chunks", unit="docs"):
-            buffer_ids.extend(item["input_ids"])
-            buffer_segs.extend(item["segment_ids"])
-            
-            while len(buffer_ids) >= chunk_size:
-                yield {
-                    "input_ids": buffer_ids[:chunk_size],
-                    "segment_ids": buffer_segs[:chunk_size]
-                }
-                buffer_ids = buffer_ids[chunk_size:]
-                buffer_segs = buffer_segs[chunk_size:]
-    
-    # 直接从生成器创建 Dataset，使用迭代方式避免内存峰值
-    return Dataset.from_generator(chunks_gen)
+    features = {
+        "input_ids": Sequence(Value("int32")),
+        "segment_ids": Sequence(Value("int32")),
+    }
+    ds_chunks = Dataset.from_generator(
+        lambda: iter_fixed_chunks(tokenized, chunk_size=4096, drop_last=True, with_tqdm=False),
+        features=Features(features),
+    )
+    return ds_chunks
 
 
 def make_basic_block_attention_additive(N: int, start_pos: int, block_size: int, device=None, dtype=torch.float32):
@@ -364,6 +383,10 @@ def collect_training_data(
     extended_segment_ids = torch.cat([seg_left, seg_left], dim=1)      # [B_eff, 2L]
 
     return extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids
+
+# 方案 B：HF Dataset.from_generator（注意潜在物化）
+from datasets import Dataset, Features, Sequence, Value
+
 
 
 
