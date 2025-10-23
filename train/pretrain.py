@@ -78,7 +78,7 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
         seg_list = [ [i] * len(ids) for i, ids in enumerate(ids_list) ]
         return {"input_ids": ids_list, "segment_ids": seg_list}
 
-    tokenized = ds.map(tok_fn, batched=True, remove_columns=ds.column_names)
+    tokenized = ds.map(tok_fn, batched=True, remove_columns=ds.column_names, num_proc=1000)
 
     # 展平为长序列，同时展平段号
     all_ids = list(chain.from_iterable(tokenized["input_ids"]))
