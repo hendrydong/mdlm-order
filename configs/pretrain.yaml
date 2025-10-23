@@ -6,6 +6,7 @@ wandb:
 experiment:
     project: "pretrain" # need to be same of this file name 
     num_node: 1 # the number of machines you have
+    name: "baseline"
 
 
 model:
@@ -21,7 +22,7 @@ dataset:
 training:
     gradient_checkpointing_enable: True # if the sequence is very larger, set as True
     gradient_accumulation_steps: 16
-    batch_size_lm: 8
+    batch_size_lm: 4
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086
@@ -30,7 +31,7 @@ training:
     method: "semi-ar" # "semi-ar""trace"
     lower_p: 0.1
     upper_p: 0.9
-    block_size: 4 # the block size of your model
+    block_size: 128 # the block size of your model
     shrink: 1
     post_num: 0 # number of pad token need to be trained for each data point
     max_gen_length: 2000

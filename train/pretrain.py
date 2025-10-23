@@ -434,7 +434,7 @@ def main():
             config.wandb.run_id = run_id
 
         wandb_init_kwargs = dict(
-            name=config.experiment.project,
+            name=config.experiment.name,
             id=run_id,
             resume=resume_wandb_run,
             entity=config.wandb.get("entity", None),
