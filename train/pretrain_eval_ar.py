@@ -298,7 +298,7 @@ def collect_training_data(
     # -------- semi-ar --------
     if config.training.method == "semi-ar":
         for b in range(B):
-            prob_ramp  = torch.empty(L1, device=input_ids.device).uniform_(lower, upper)
+            prob_ramp  = torch.empty(L1, device=input_ids.device).uniform_(lower, upper)+100
             rand_tail  = torch.rand(L1, device=input_ids.device)
             pmask_tail = rand_tail <= prob_ramp
 
