@@ -50,6 +50,27 @@ os.environ["TOKENIZERS_PARALLELISM"]="false"
 from collections import deque
 from typing import Dict, Iterable, Iterator, List, Optional
 
+def order_to_attention_mask(order, bias, K):
+    bias_shift = bias.clone()
+    B, _, N, _ = bias_shift.shape
+    index_set = set()
+    if K > 0:
+        for j in range(N//2, N):
+            index_idx = j - N//2
+            order_idx = order[index_idx].item()
+            for k in range(1, K+1):
+                index1 = j - k
+                index2 = j + k
+                if index1 >= N//2 and bias_shift[:, :, j, index1-N//2] == 1:
+                    if index1-N//2 not in index_set:
+                        bias_shift[:, :, j, index1] = 1
+                        bias_shift[:, :, j, index1-N//2] = 0
+                if index2 < N and bias_shift[:, :, j, index2-N//2] == 1:
+                    if index2-N//2 not in index_set:
+                        bias_shift[:, :, j, index2] = 1
+                        bias_shift[:, :, j, index2-N//2] = 0
+            index_set.add(order_idx)
+    return bias_shift
 
 def iter_fixed_chunks(
     tokenized: Iterable[Dict[str, List[int]]],
