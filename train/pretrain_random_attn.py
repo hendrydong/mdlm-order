@@ -809,9 +809,9 @@ def main():
 
         # 先复制你的 block 规则得到 base add-bias
         
-        # 复制基础块规则
-        
-        order = sample_order_anchor_lookahead_fast(config.training.chunk_size, config.training.block_size + 1, 0.1)
+
+        order = torch.arange(config.training.chunk_size)
+        #sample_order_anchor_lookahead_fast(config.training.chunk_size, config.training.block_size + 1, 0.1)
 
         attn_bias = order_to_attention_mask(order, base_bias, config.training.block_size)
         
