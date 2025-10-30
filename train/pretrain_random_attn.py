@@ -72,6 +72,66 @@ def order_to_attention_mask(order, bias, K):
             index_set.add(order_idx)
     return bias_shift
 
+@torch.no_grad()
+def sample_order_anchor_lookahead_fast(
+    T: int,
+    K: int = 16,        # 只向右看的窗口宽度
+    beta: float = 0.7,  # 距离衰减强度：大→更偏好就近
+    device="cpu",
+):
+    assert T > 0 and K > 0
+    K = min(K, T)
+    chosen = torch.zeros(T, dtype=torch.bool, device=device)
+
+    # 预计算距离对应的对数权重（logits），Gumbel Max 不需要归一化
+    dists = torch.arange(K, device=device)
+    logits_by_dist = -beta * dists  # shape [K]
+
+    # 结果预分配
+    order = torch.empty(T, dtype=torch.long, device=device)
+    wptr = 0
+
+    t = 0  # 锚点 = 当前最左未选
+    for _ in range(T):
+        # 推到当前最左未选（总共最多前进 T 次）
+        while t < T and chosen[t]:
+            t += 1
+        if t >= T:
+            break
+
+        # 当前窗口 [t, R]
+        R = min(T - 1, t + K - 1)
+        wlen = R - t + 1
+
+        # 窗口内未选 mask
+        window_mask = ~chosen[t : R + 1]                 # [wlen]
+        if not window_mask.any():
+            # 窗口被选空，锚点跳到窗口右侧再继续
+            t = R + 1
+            continue
+
+        # 取对应距离的 logits（长度 wlen），把已选位置置为 -inf
+        logits = logits_by_dist[:wlen].clone()           # [wlen]
+        logits[~window_mask] = float("-inf")
+
+        # Gumbel-Max 采样：argmax(logits + Gumbel)
+        g = -torch.log(-torch.log(torch.rand_like(logits)))
+        pick_off = torch.argmax(logits + g)              # 标量张量（仍在 device 上）
+        i_star = t + pick_off
+
+        # 记录与标记
+        chosen[i_star] = True
+        order[wptr] = i_star
+        wptr += 1
+
+        # 若恰好选中锚点，则推进锚点到下一个未选
+        if i_star == t:
+            while t < T and chosen[t]:
+                t += 1
+
+    return order[:wptr]
+
+
 def iter_fixed_chunks(
     tokenized: Iterable[Dict[str, List[int]]],
     chunk_size: int,
@@ -752,11 +812,12 @@ def main():
         # 先复制你的 block 规则得到 base add-bias
         
         # 复制基础块规则
-        attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(base_bias.dtype)
+        
+        order = sample_order_anchor_lookahead_fast(config.training.chunk_size, config.training.block_size + 1, 0.1)
 
-        order = sample_order_anchor_lookahead(config.training.chunk_size, config.training.block_size + 1, 0.1)
-
-        attn_bias = order_to_attention_mask(order, attn_bias, config.training.block_size)
+        attn_bias = order_to_attention_mask(order, base_bias, config.training.block_size)
+        
+        attn_bias = attn_bias.repeat(B_eff, 1, 1, 1).to(attn_bias.dtype)
 
         
         
