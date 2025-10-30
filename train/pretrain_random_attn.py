@@ -316,6 +316,7 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
 
     allow = torch.zeros((BATCH, 1, N, N), dtype=torch.bool, device=device)
 
+    
     # --- 索引区间 ---
     A_start, A_end = 0, L0
     B_start, B_end = L0, L0 + L1
@@ -330,7 +331,7 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
     # =========================================================
 
     # C 的原始分块行为被新的 C 规则替换，所以这里只处理 A/B 和 A 的三角前缀
-
+    block_size = int(block_size) + 1 
     # 对 B 查询行：原逻辑
     if L1 > 0 and block_size > 0:
         for bi in range((L1 + block_size - 1) // block_size):
@@ -357,7 +358,7 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
     # 2) C 查询行：按你的新规则
     #    k 使用 block_size（可为 0）
     # =========================================================
-    k = int(block_size)
+    k = int(block_size) - 1
 
     for i in range(L1):
         r = C_start + i  # C 段第 i 个位置的行
