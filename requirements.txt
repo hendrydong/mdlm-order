@@ -27,6 +27,6 @@ nest_asyncio
 ipykernel
 math_verify
 
-
+flash_attn==2.7.4.post1
 wandb
 tensorboard
