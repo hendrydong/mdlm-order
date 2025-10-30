@@ -214,6 +214,152 @@ def process_pad_additive(additive_bias, input_ids, pad_id, start_pos):
         A[b_idx, r_idx, r_idx] = 0.0
     return additive_bias
 
+def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int, device=None, dtype=torch.float32):
+    """
+    ABC 划分：N = L0 + 2*L1
+    - A: [0, L0)
+    - B: [L0, L0+L1)
+    - C: [L0+L1, L0+2*L1)
+
+    规则：
+    - A/B 的查询行：保持与原代码一致（分块推进）
+    - C 的查询行（索引 i ∈ [0, L1)）：
+        * 能看到全部 A
+        * 在 B 中能看到：< i 的所有，以及 > i 的接下来的 k 个（k = block_size），但看不到第 i 个本位
+        * 在 C 中只能看到自己
+    """
+    BATCH = 1
+    L0 = start_pos
+    L1 = (N - L0) // 2
+    assert L0 + 2 * L1 == N, "input length must be L0 + 2*L1"
+
+    allow = torch.zeros((BATCH, 1, N, N), dtype=torch.bool, device=device)
+
+    # --- 索引区间 ---
+    A_start, A_end = 0, L0
+    B_start, B_end = L0, L0 + L1
+    C_start, C_end = L0 + L1, L0 + 2 * L1
+
+    rows_A = torch.arange(A_start, A_end, device=device)
+    rows_B = torch.arange(B_start, B_end, device=device)
+    rows_C = torch.arange(C_start, C_end, device=device)
+
+    # =========================================================
+    # 1) A、B 查询行：沿用原始源码行为（分块推进）
+    # =========================================================
+
+    # C 的原始分块行为被新的 C 规则替换，所以这里只处理 A/B 和 A 的三角前缀
+
+    # 对 B 查询行：原逻辑
+    if L1 > 0 and block_size > 0:
+        for bi in range((L1 + block_size - 1) // block_size):
+            i_start = bi * block_size
+            i_end   = min((bi + 1) * block_size, L1)
+
+            block_rows = rows_B[i_start:i_end]
+            # 该块内 B 行能看到从开头到 left_end2 的前缀（含 A + B 的一部分）
+            left_end2  = L0 + min((bi + 1) * block_size, L1)
+            # 注意：这里 left_end2 是绝对列索引的右开界
+            allow[:, :, block_rows.unsqueeze(-1), 0:left_end2] = True
+
+    # 对 A 查询行：原逻辑（A 内部前缀可见，形成上三角）
+    if L0 > 0 and block_size > 0:
+        for bi in range((L0 + block_size - 1) // block_size):
+            row_end   = max(L0 - bi * block_size, 0)
+            row_start = max(L0 - (bi + 1) * block_size, 0)
+            if row_end > row_start:
+                block_rows = torch.arange(row_start, row_end, device=device)
+                # A 行能看到从开头到自身行号的前缀
+                allow[:, :, block_rows.unsqueeze(-1), 0:row_end] = True
+
+    # =========================================================
+    # 2) C 查询行：按你的新规则
+    #    k 使用 block_size（可为 0）
+    # =========================================================
+    k = int(block_size)
+
+    for i in range(L1):
+        r = C_start + i  # C 段第 i 个位置的行
+
+        # 2.1 看到全部 A
+        if L0 > 0:
+            allow[:, :, r:r+1, A_start:A_end] = True
+
+        # 2.2 B 中看到：< i 的所有，以及 > i 的接下来的 k 个，但看不到第 i 个
+        #    把 B 的“第 i 个位置”换成绝对列 L0 + i
+        b_i_abs = B_start + i
+
+        #    之前的所有（左开右开边界注意：PyTorch 切片右边是开区间）
+        if i > 0:
+            allow[:, :, r:r+1, B_start:b_i_abs] = True
+
+        #    之后的 k 个（不含 b_i_abs 自身）
+        if k > 0:
+            after_start = b_i_abs + 1
+            after_end   = min(B_start + L1, b_i_abs + 1 + k)
+            if after_start < after_end:
+                allow[:, :, r:r+1, after_start:after_end] = True
+
+        # 2.3 C 中只能看到自己
+        allow[:, :, r, r] = True
+
+    # 转成加性 bias（允许=1，否则=0）
+    bias = torch.zeros_like(allow, dtype=dtype)
+    bias[allow] = 1
+    return bias
+
+
+def _softmax_exp_neg(offsets, beta):
+    logits = -beta * offsets.to(torch.float32)
+    return torch.softmax(logits - logits.max(), dim=0)
+
+def sample_order_anchor_lookahead(
+    T: int,
+    K: int = 16,       # 仅向右看的窗口宽度
+    beta: float = 0.7, # 距离衰减强度：大→更偏好就近(更像左到右)
+    device="cpu",
+):
+    chosen = torch.zeros(T, dtype=torch.bool, device=device)
+    order = []
+    t = 0  # 左侧锚点，始终为“当前最左未选”
+
+    for _ in range(T):
+        # 推到当前最左未选
+        while t < T and chosen[t]:
+            t += 1
+        if t >= T:
+            break
+
+        # 窗口 [t, min(t+K-1, T-1)]
+        L, R = t, min(T - 1, t + K - 1)
+        cand = torch.arange(L, R + 1, device=device)
+        cand = cand[~chosen[cand]]          # 只在未选里抽
+        if len(cand) == 0:
+            # 窗口刚好被选空，推进锚点再来一轮
+            t = R + 1
+            continue
+
+        # 按 exp(-beta * (i - t)) 抽样
+        d = (cand - t).clamp_min(0)
+        p = _softmax_exp_neg(d, beta)
+        i_star = cand[torch.multinomial(p, 1).item()].item()
+
+        chosen[i_star] = True
+        order.append(i_star)
+
+        # 只有当本次选中的是锚点 t，才推进锚点
+        if i_star == t:
+            while t < T and chosen[t]:
+                t += 1
+
+    return torch.tensor(order, dtype=torch.long, device=device)
+
+def perm_to_mask(perm: torch.Tensor):
+    T = perm.numel()
+    inv = torch.empty_like(perm)
+    inv[perm] = torch.arange(T, device=perm.device)
+    rank = inv
+    return rank.unsqueeze(0) > rank.unsqueeze(1)  # [T,T] bool
 
 def one_round_vectorized(input_ids_b, step_map_b, L0, L1, block_size, mask_id):
     device = input_ids_b.device
@@ -298,7 +444,7 @@ def collect_training_data(
     # -------- semi-ar --------
     if config.training.method == "semi-ar":
         for b in range(B):
-            prob_ramp  = torch.empty(L1, device=input_ids.device).uniform_(lower, upper)
+            prob_ramp  = torch.empty(L1, device=input_ids.device).uniform_(lower, upper)+100
             rand_tail  = torch.rand(L1, device=input_ids.device)
             pmask_tail = rand_tail <= prob_ramp
 
@@ -532,7 +678,15 @@ def main():
     N  = L0 + 2 * L1
 
     # 构造基础加性 mask（在 device 上，dtype 与模型一致）
-    base_bias = make_basic_block_attention_additive(
+    base_bias = make_basic_window_attention_additive(
+        N=N,
+        start_pos=L0,
+        block_size=config.training.block_size,
+        device=accelerator.device,
+        dtype=next(model.parameters()).dtype
+    )
+
+    base_bias_eval = make_basic_window_attention_additive(
         N=N,
         start_pos=L0,
         block_size=config.training.block_size,
@@ -543,7 +697,7 @@ def main():
     # collate: 把一个 batch 的 input_ids 变成训练所需四元组
     need_step = (config.training.method == "trace")
 
-    def collate_build_batch(batch):
+    def collate_build_batch(batch, base_bias=base_bias):
         # batch: list of {"input_ids": [L], "segment_ids": [L]}
         input_ids = torch.tensor([ex["input_ids"] for ex in batch],
                                 dtype=torch.long, device=accelerator.device)    # [B, L]
@@ -578,6 +732,13 @@ def main():
         
         # 复制基础块规则
         attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(base_bias.dtype)
+
+        order = sample_order_anchor_lookahead(config.training.chunk_size, config.training.block_size + 1, 0.1)
+
+        attn_bias = order_to_attention_mask(order, attn_bias, config.training.block_size)
+
+        
+        
         # 与分段可见性交集
         same_seg = extended_segment_ids.unsqueeze(-1).eq(extended_segment_ids.unsqueeze(-2)).unsqueeze(1)
         attn_bias = attn_bias.masked_fill(~same_seg, 0)
@@ -617,7 +778,7 @@ def main():
         packed_ds_val,
         batch_size=config.training.batch_size_lm,
         shuffle=False,
-        collate_fn=collate_build_batch,
+        collate_fn=lambda x: collate_build_batch(x, base_bias=base_bias_eval),
         num_workers=0
     )
 
