@@ -833,7 +833,7 @@ def main():
         
 
         
-        attn_bias = attn_bias.repeat(B_eff, 1, 1, 1).to(attn_bias.dtype)
+        attn_bias = base_bias.repeat(B_eff, 1, 1, 1).to(base_bias.dtype)
 
         
         
