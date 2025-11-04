@@ -132,6 +132,84 @@ def sample_order_anchor_lookahead_fast(
     return order[:wptr]
 
 
+import torch
+
+def _segments_from_labels_1d(labels: torch.Tensor):
+    """
+    把一维 labels 按相邻相同值切成连续段，返回每段的 [start, end) 边界列表。
+    """
+    assert labels.dim() == 1
+    L = labels.numel()
+    if L == 0:
+        return []
+    # 边界：当前位置与前一位置的 label 不同
+    diff = torch.ones(L, dtype=torch.bool, device=labels.device)
+    diff[1:] = labels[1:] != labels[:-1]
+    starts = torch.nonzero(diff, as_tuple=False).flatten()
+    # 末尾补一个 L 作为右边界
+    ends = torch.empty_like(starts)
+    ends[:-1] = starts[1:]
+    ends[-1] = L
+    return [(int(s.item()), int(e.item())) for s, e in zip(starts, ends)]
+
+
+@torch.no_grad()
+def shuffle_within_segments(
+    labels: torch.Tensor,          # (L,) 或 (B, L) 的整型张量，连续相同值构成一个 segment
+    pos_tail: torch.Tensor,        # 与 labels 同形
+    K: int = 4,
+    beta: float = 0.1,
+):
+    """
+    返回：
+      indice: 与 labels 同形的 long 张量，每行是 [0..L-1] 的全局置换，且仅在各 segment 内打乱
+      labels_shuf  = labels.gather(最后一维, indice)
+      pos_tail_shuf= pos_tail.gather(最后一维, indice)
+    """
+    device = labels.device
+    assert labels.shape == pos_tail.shape
+    assert labels.dim() in (1, 2)
+
+    def shuffle_1d(lbl_1d: torch.Tensor, pos_1d: torch.Tensor):
+        L = lbl_1d.numel()
+        if L == 0:
+            return torch.empty(0, dtype=torch.long, device=device)
+        # 初始化为身份置换
+        idx = torch.arange(L, device=device, dtype=torch.long)
+
+        for s, e in _segments_from_labels_1d(lbl_1d):
+            T = e - s
+            if T <= 1:
+                continue
+            # 每段独立调用你的采样器，注意 K 不能超过段长
+            order_local = sample_order_anchor_lookahead_fast(
+                T=T, K=min(K, T), beta=beta, device=device
+            )                              # 长度 T，取值在 [0..T-1]
+            idx[s:e] = idx[s:e][order_local]
+
+        return idx
+
+    if labels.dim() == 1:
+        indice = shuffle_1d(labels, pos_tail)
+        labels_shuf = labels[indice]
+        pos_tail_shuf = pos_tail[indice]
+        return indice, labels_shuf, pos_tail_shuf
+
+    # batched: (B, L)
+    B, L = labels.shape
+    indice_list = []
+    for b in range(B):
+        idx_b = shuffle_1d(labels[b], pos_tail[b])
+        indice_list.append(idx_b)
+    indice = torch.stack(indice_list, dim=0)                    # (B, L)
+
+    # 按最后一维 gather
+    gather_dim = -1
+    #labels_shuf   = torch.gather(labels,   gather_dim, indice)
+    pos_tail_shuf = torch.gather(pos_tail, gather_dim, indice)
+    return indice, pos_tail_shuf
+
+
 def iter_fixed_chunks(
     tokenized: Iterable[Dict[str, List[int]]],
     chunk_size: int,
@@ -316,7 +394,6 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
 
     allow = torch.zeros((BATCH, 1, N, N), dtype=torch.bool, device=device)
 
-    
     # --- 索引区间 ---
     A_start, A_end = 0, L0
     B_start, B_end = L0, L0 + L1
@@ -331,8 +408,10 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
     # =========================================================
 
     # C 的原始分块行为被新的 C 规则替换，所以这里只处理 A/B 和 A 的三角前缀
-    block_size = int(block_size) + 1 
+
     # 对 B 查询行：原逻辑
+    k = block_size - 1
+    block_size = 1
     if L1 > 0 and block_size > 0:
         for bi in range((L1 + block_size - 1) // block_size):
             i_start = bi * block_size
@@ -358,7 +437,6 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
     # 2) C 查询行：按你的新规则
     #    k 使用 block_size（可为 0）
     # =========================================================
-    k = int(block_size) - 1
 
     for i in range(L1):
         r = C_start + i  # C 段第 i 个位置的行
@@ -380,7 +458,7 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
             after_start = b_i_abs + 1
             after_end   = min(B_start + L1, b_i_abs + 1 + k)
             if after_start < after_end:
-                allow[:, :, r:r+1, after_start:after_end] = True
+                allow[:, :, r:r+1, after_start+L1:after_end+L1] = True
 
         # 2.3 C 中只能看到自己
         allow[:, :, r, r] = True
@@ -443,42 +521,7 @@ def perm_to_mask(perm: torch.Tensor):
     rank = inv
     return rank.unsqueeze(0) > rank.unsqueeze(1)  # [T,T] bool
 
-def one_round_vectorized(input_ids_b, step_map_b, L0, L1, block_size, mask_id):
-    device = input_ids_b.device
-    NB = (L1 + block_size - 1) // block_size
 
-    step_pad = torch.full((NB * block_size,), -1, dtype=torch.long, device=device)
-    step_pad[:L1] = step_map_b
-    step_blk = step_pad.view(NB, block_size)
-
-    valid = step_blk.ge(0)
-    big = torch.iinfo(step_blk.dtype).max
-    tmp = step_blk.masked_fill(~valid, big)
-    min_vals, _ = tmp.min(dim=1, keepdim=True)
-
-    pmask_blk = step_blk.eq(min_vals) & valid
-    if not pmask_blk.any():
-        return None, None, step_map_b, False
-
-    ge_mask_blk = step_blk.ge(min_vals) & valid
-
-    pmask_tail = pmask_blk.view(-1)[:L1]
-    ge_mask_tail = ge_mask_blk.view(-1)[:L1]
-
-    pmask_b = torch.zeros(L0 + L1, dtype=torch.bool, device=device)
-    pmask_b[L0:] = pmask_tail
-
-    tail = input_ids_b[L0:L0 + L1].clone()
-    tail[ge_mask_tail] = mask_id
-
-    extended_input_ids_b = torch.empty(L0 + L1 + L1, dtype=input_ids_b.dtype, device=device)
-    extended_input_ids_b[:L0 + L1] = input_ids_b
-    extended_input_ids_b[L0 + L1:] = tail
-
-    new_step_map_b = step_map_b.clone()
-    new_step_map_b[pmask_tail] = -1
-
-    return extended_input_ids_b, pmask_b, new_step_map_b, True
 
 
 def segment_positions_from_segids(seg_ids: torch.LongTensor) -> torch.LongTensor:
@@ -523,54 +566,36 @@ def collect_training_data(
     extended_input_ids_list = []
     pmask_list = []
     seg_kept_list = []   # 每条扩展样本左半段对应的 segment_ids（用于生成扩展段 seg）
+    order_list = []
     # -------- semi-ar --------
     if config.training.method == "semi-ar":
         for b in range(B):
             pmask_tail = torch.ones(L1, dtype=torch.bool, device=input_ids.device)
-
             pmask_b = torch.cat([
                 torch.zeros(L0, dtype=torch.bool, device=input_ids.device),
                 pmask_tail
             ], dim=0)  # [L0+L1]==[L]
 
             noise_tail = input_ids[b, L0:].clone()
+            input_labels = input_ids[b, L0:]
             noise_tail.masked_fill_(pmask_tail, mask_id)
-            extended_b = torch.cat([input_ids[b], noise_tail], dim=0)  # [2L]
+            
+            pos_left = segment_positions_from_segids(segment_ids[b].reshape(1,-1))       # [1, L]
+    
+            pos_tail = pos_left[:,L0:]        # [1, L1]
+            
+            #sample_order_anchor_lookahead_fast,
+            shuffled_indices, shuffled_pos_tail = shuffle_within_segments(segment_ids[b][L0:], pos_tail, K = config.training.block_size, beta = 0.1)
+
+            extended_b = torch.cat([input_ids[b][:L0], input_labels[shuffled_indices], noise_tail], dim=0)  # [2L]
+
+            extended_pos = torch.cat([pos_left[:, :L0], shuffled_pos_tail, shuffled_pos_tail], dim=1)  # [1, 2L]
+
 
             extended_input_ids_list.append(extended_b)
             pmask_list.append(pmask_b)
             seg_kept_list.append(segment_ids[b])  # 记录下这条样本的段号
-
-    # -------- trace --------
-    elif config.training.method == "trace":
-        # 预处理 step_map
-        for b in range(B):
-            step_map_i = step_map_list[b]
-            for j in range(int((L1 - 1) / block_size) + 1):
-                s = j * block_size
-                e = min(L1, (j + 1) * block_size)
-                step_map_list[b][s:e] = collapse_k_unique(step_map_i[s:e], config.training.shrink)
-
-        step_map = torch.as_tensor(step_map_list, dtype=torch.long, device=input_ids.device)
-        assert step_map.shape[1] == L1
-
-        for b in range(B):
-            step_b = step_map[b]
-            while True:
-                out = one_round_vectorized(
-                    input_ids_b=input_ids[b],
-                    step_map_b=step_b,
-                    L0=L0,
-                    L1=L1,
-                    block_size=block_size,
-                    mask_id=mask_id,
-                )
-                extended_b, pmask_b, step_b, has_any = out
-                if not has_any:
-                    break
-                extended_input_ids_list.append(extended_b)
-                pmask_list.append(pmask_b)
-                seg_kept_list.append(segment_ids[b])  # 同一左半段可能生成多条扩展，段号一致
+            order_list.append(extended_pos.squeeze(0))
     else:
         raise ValueError(f"Unknown training.method: {config.training.method}")
 
@@ -578,15 +603,10 @@ def collect_training_data(
     extended_input_ids = torch.stack(extended_input_ids_list, dim=0)  # [B_eff, 2L]
     p_mask             = torch.stack(pmask_list, dim=0).to(torch.bool)  # [B_eff, L]
     seg_left           = torch.stack(seg_kept_list, dim=0)  # [B_eff, L]（左半段的段号）
+    tok_idx_ext      = torch.stack(order_list, dim=0)        # [B_eff, L1]
 
-    # —— 生成 labels（只监督左半段）——
-    labels = extended_input_ids[:, :L].clone()
-
-    # —— 基于 segment 计算 position ids —— 
-    # 左半段按段重置；右半段沿用左半段 tail（不跨文档连续累加）
-    pos_left = segment_positions_from_segids(seg_left)                # [B_eff, L]
-    pos_tail = pos_left[:, L0:]                                       # [B_eff, L1]
-    tok_idx_ext = torch.cat([pos_left, pos_tail], dim=1)              # [B_eff, 2L]
+    
+    #tok_idx_ext = torch.cat([pos_left, pos_tail], dim=1)              # [B_eff, 2L]
 
     # （可选）如需对 pad 做处理：如果你的打包没有 pad 可忽略
     if pad_id is not None:
@@ -811,10 +831,6 @@ def main():
         # 先复制你的 block 规则得到 base add-bias
         
 
-        order = torch.arange(config.training.chunk_size)
-        #sample_order_anchor_lookahead_fast(config.training.chunk_size, config.training.block_size + 1, 0.1)
-
-        attn_bias = order_to_attention_mask(order, base_bias, config.training.block_size)
         
         attn_bias = attn_bias.repeat(B_eff, 1, 1, 1).to(attn_bias.dtype)
 
@@ -945,6 +961,7 @@ def main():
 
             accelerator.log(
                 {
+                    "train/mask_num": batch["p_mask"].sum().item(),
                     "train/loss_lm": loss_lm.detach().item(),
                     "train/lr": lr_scheduler.get_last_lr()[0],
                     "train/step_global": step_full,
