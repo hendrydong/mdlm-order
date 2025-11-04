@@ -410,7 +410,7 @@ def make_basic_window_attention_additive(N: int, start_pos: int, block_size: int
     # C 的原始分块行为被新的 C 规则替换，所以这里只处理 A/B 和 A 的三角前缀
 
     # 对 B 查询行：原逻辑
-    k = 1#block_size - 1
+    k = 0#block_size - 1
     block_size = 1
     if L1 > 0 and block_size > 0:
         for bi in range((L1 + block_size - 1) // block_size):
