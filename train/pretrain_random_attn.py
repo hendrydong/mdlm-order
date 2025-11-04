@@ -605,7 +605,8 @@ def collect_training_data(
     seg_left           = torch.stack(seg_kept_list, dim=0)  # [B_eff, L]（左半段的段号）
     tok_idx_ext      = torch.stack(order_list, dim=0)        # [B_eff, L1]
 
-    
+    labels = extended_input_ids[:, :L].clone()
+
     #tok_idx_ext = torch.cat([pos_left, pos_tail], dim=1)              # [B_eff, 2L]
 
     # （可选）如需对 pad 做处理：如果你的打包没有 pad 可忽略
