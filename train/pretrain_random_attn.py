@@ -585,7 +585,7 @@ def collect_training_data(
             pos_tail = pos_left[:,L0:]        # [1, L1]
             
             #sample_order_anchor_lookahead_fast,
-            shuffled_indices, shuffled_pos_tail = shuffle_within_segments(segment_ids[b][L0:], pos_tail, K = config.training.block_size, beta = 0.1)
+            shuffled_indices, shuffled_pos_tail = shuffle_within_segments(segment_ids[b][L0:].reshape(-1,1), pos_tail, K = config.training.block_size, beta = 0.1)
 
             extended_b = torch.cat([input_ids[b][:L0], input_labels[shuffled_indices], noise_tail], dim=0)  # [2L]
 
