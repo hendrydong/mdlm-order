@@ -473,46 +473,7 @@ def _softmax_exp_neg(offsets, beta):
     logits = -beta * offsets.to(torch.float32)
     return torch.softmax(logits - logits.max(), dim=0)
 
-def sample_order_anchor_lookahead(
-    T: int,
-    K: int = 16,       # 仅向右看的窗口宽度
-    beta: float = 0.7, # 距离衰减强度：大→更偏好就近(更像左到右)
-    device="cpu",
-):
-    chosen = torch.zeros(T, dtype=torch.bool, device=device)
-    order = []
-    t = 0  # 左侧锚点，始终为“当前最左未选”
 
-    for _ in range(T):
-        # 推到当前最左未选
-        while t < T and chosen[t]:
-            t += 1
-        if t >= T:
-            break
-
-        # 窗口 [t, min(t+K-1, T-1)]
-        L, R = t, min(T - 1, t + K - 1)
-        cand = torch.arange(L, R + 1, device=device)
-        cand = cand[~chosen[cand]]          # 只在未选里抽
-        if len(cand) == 0:
-            # 窗口刚好被选空，推进锚点再来一轮
-            t = R + 1
-            continue
-
-        # 按 exp(-beta * (i - t)) 抽样
-        d = (cand - t).clamp_min(0)
-        p = _softmax_exp_neg(d, beta)
-        i_star = cand[torch.multinomial(p, 1).item()].item()
-
-        chosen[i_star] = True
-        order.append(i_star)
-
-        # 只有当本次选中的是锚点 t，才推进锚点
-        if i_star == t:
-            while t < T and chosen[t]:
-                t += 1
-
-    return torch.tensor(order, dtype=torch.long, device=device)
 
 def perm_to_mask(perm: torch.Tensor):
     T = perm.numel()
@@ -553,6 +514,7 @@ def collect_training_data(
     pad_id,
     config,
     segment_ids=None,       # [B, L] LongTensor，必传以便分段位置
+    K = config.training.block_size,
 ):
     assert segment_ids is not None, "segment_ids 不能为空；packing 时需要用于位置重置"
     B, L = input_ids.shape
@@ -585,7 +547,7 @@ def collect_training_data(
             pos_tail = pos_left[:,L0:]        # [1, L1]
             
             #sample_order_anchor_lookahead_fast,
-            shuffled_indices, shuffled_pos_tail = shuffle_within_segments(segment_ids[b][L0:].reshape(1,-1), pos_tail, K = config.training.block_size, beta = 0.1)
+            shuffled_indices, shuffled_pos_tail = shuffle_within_segments(segment_ids[b][L0:].reshape(1,-1), pos_tail, K = K, beta = 0.1)
             shuffled_input_labels = torch.gather(input_labels, 0, shuffled_indices.squeeze(0))
             extended_b = torch.cat([input_ids[b][:L0], shuffled_input_labels, noise_tail], dim=0)  # [2L]
 
@@ -798,7 +760,7 @@ def main():
     # collate: 把一个 batch 的 input_ids 变成训练所需四元组
     need_step = (config.training.method == "trace")
 
-    def collate_build_batch(batch, base_bias=base_bias):
+    def collate_build_batch(batch, base_bias=base_bias, K=config.training.block_size):
         # batch: list of {"input_ids": [L], "segment_ids": [L]}
         input_ids = torch.tensor([ex["input_ids"] for ex in batch],
                                 dtype=torch.long, device=accelerator.device)    # [B, L]
@@ -820,6 +782,7 @@ def main():
                 pad_id=pad_id,
                 config=config,
                 segment_ids=seg_ids,
+                K=K,
             )
 
         # 因为 collect_training_data 可能过滤（keep），所以要同步筛选 seg_ids
@@ -876,7 +839,7 @@ def main():
         packed_ds_val,
         batch_size=config.training.batch_size_lm,
         shuffle=False,
-        collate_fn=lambda x: collate_build_batch(x, base_bias=base_bias_eval),
+        collate_fn=lambda x: collate_build_batch(x, base_bias=base_bias_eval, K=1),
         num_workers=0
     )
 
