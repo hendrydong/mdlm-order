@@ -514,12 +514,14 @@ def collect_training_data(
     pad_id,
     config,
     segment_ids=None,       # [B, L] LongTensor，必传以便分段位置
-    K = config.training.block_size,
+    K = None,
 ):
     assert segment_ids is not None, "segment_ids 不能为空；packing 时需要用于位置重置"
     B, L = input_ids.shape
     L0 = start_pos
     L1 = L - L0
+    if K is None:
+        K = config.training.block_size
     block_size = config.training.block_size
 
     lower = config.training.lower_p
