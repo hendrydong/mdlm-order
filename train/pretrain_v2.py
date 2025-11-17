@@ -537,7 +537,7 @@ def collect_training_data(
             order_b = order_ids[b, L0:]  # [L1]
             base_len = len(order_b) // 4
             if config.training.method == "semi-ar":
-                order_b = torch.arange_like(order_b)
+                order_b = torch.arange(len(order_b), device=order_b.device)  # [L1]
             elif config.training.method == "random":
                 base = torch.tensor([0, 1, 2, 3], device=order_b.device)          # [4]
                 noise = torch.rand(base_len, 4, device=order_b.device)                   # [K, 4]
