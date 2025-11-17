@@ -1030,7 +1030,7 @@ def save_checkpoint(model, tokenizer, config, accelerator, name):
     from pathlib import Path
     import time, json, shutil, os, glob, importlib, inspect
 
-    output_dir = Path(config.experiment.project)
+    output_dir = Path(config.experiment.name)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoints_total_limit = config.experiment.get("checkpoints_total_limit", None)
