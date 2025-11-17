@@ -6,7 +6,7 @@ wandb:
 experiment:
     project: "pretrain" # need to be same of this file name 
     num_node: 1 # the number of machines you have
-    name: "pretrain-v2-1117-random"
+    name: "pretrain-v2-1117-random-fixed"
 
 
 model:

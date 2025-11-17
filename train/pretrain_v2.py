@@ -767,7 +767,7 @@ def main():
     N  = L0 + 2 * L1
 
     # 构造基础加性 mask（在 device 上，dtype 与模型一致）
-    base_bias = make_basic_window_attention_additive(
+    base_bias = make_basic_block_attention_additive(
         N=N,
         start_pos=L0,
         block_size=config.training.block_size,
@@ -775,7 +775,7 @@ def main():
         dtype=next(model.parameters()).dtype
     )
 
-    base_bias_eval = make_basic_window_attention_additive(
+    base_bias_eval = make_basic_block_attention_additive(
         N=N,
         start_pos=L0,
         block_size=config.training.block_size,
