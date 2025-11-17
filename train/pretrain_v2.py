@@ -290,7 +290,7 @@ def prepare_pretrain_packed_concat(ds, tokenizer, chunk_size, add_eos=True, eos_
         ids_list = examples["input_ids"]
         # 为每条样本分配一个 doc 段号，整条样本同一段号
         seg_list = [ [torch.randint(1024,[]).item()] * len(ids) for ids in ids_list]
-        return {"input_ids": ids_list, "segment_ids": seg_list, "order_ids": examples["decoded_order"]}
+        return {"input_ids": ids_list, "segment_ids": seg_list, "order_ids": examples["decode_orders"]}
 
     tokenized = ds.map(tok_fn, remove_columns=ds.column_names, num_proc=128)
 
