@@ -558,7 +558,7 @@ def collect_training_data(
             order_mod = order_b % 4
 
             # 2) random base noise, shape = original_length / 4
-            rand_base = torch.randint(low=0, high=4, size=(base_len,))
+            rand_base = torch.randint(low=0, high=4, size=(base_len,), device=input_ids.device)
 
             # 3) repeat expand到同长度
             rand_full = rand_base.repeat_interleave(4)
