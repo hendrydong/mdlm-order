@@ -543,7 +543,17 @@ def collect_training_data(
                 noise = torch.rand(base_len, 4, device=order_b.device)                   # [K, 4]
                 perm = noise.argsort(dim=1)                # [K, 4] 里每行是 0..3 的乱序
                 blocks = base[perm]                        # [K, 4]
-                order_b = blocks.reshape(order_b.shape)                
+                order_b = blocks.reshape(order_b.shape)   
+            elif config.training.method == "ordered":
+                order_2d = order_b.view(base_len, 4)      # [B, 4]
+
+                # 2) 每个 block 里做一次 argsort
+                idx_in_block = torch.argsort(order_2d, dim=-1)   # [B, 4]，值在 0..3
+
+                # 3) 如果你想要「在原始一维上的 index」，给每个 block 加上偏移
+                offset = (torch.arange(base_len, device=order_b.device) * 4).unsqueeze(1)  # [B, 1]
+                order_b = (idx_in_block + offset).reshape(order_b.shape)        # [L]
+
 
             order_mod = order_b % 4
 
