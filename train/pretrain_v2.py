@@ -531,13 +531,15 @@ def collect_training_data(
     pmask_list = []
     seg_kept_list = []   # 每条扩展样本左半段对应的 segment_ids（用于生成扩展段 seg）
     order_list = []
-    if config.training.method == "semi-ar" or config.training.method == "random" or config.training.method == "ordered":
+    if True:
         for b in range(B):
             # order_ids % 4, 
             order_b = order_ids[b, L0:]  # [L1]
             base_len = len(order_b) // 4
             if config.training.method == "semi-ar":
                 order_b = torch.arange(len(order_b), device=order_b.device)  # [L1]
+            elif config.training.method == "r2l":
+                order_b = torch.arange(len(order_b)-1, -1, -1, device=order_b.device)  # [L1]
             elif config.training.method == "random":
                 base = torch.tensor([0, 1, 2, 3], device=order_b.device)          # [4]
                 noise = torch.rand(base_len, 4, device=order_b.device)                   # [K, 4]
