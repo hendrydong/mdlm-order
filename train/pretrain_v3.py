@@ -554,7 +554,7 @@ def collect_training_data(
                     order_b[s:e] = blocks[:seg_len]
                 elif config.training.method == "ordered":
                     order_2d = torch.zeros((base_len_seg * 4), dtype=torch.long, device=order_b.device) + 100
-                    order_2d[:seq_len] = order_b[s:e]
+                    order_2d[:seg_len] = order_b[s:e]
                     order_2d = order_2d.reshape(base_len_seg, 4)  # [K, 4]
                     # 2) 每个 block 里做一次 argsort
                     idx_in_block = torch.argsort(order_2d, dim=-1)   # [B, 4]，值在 0..3
