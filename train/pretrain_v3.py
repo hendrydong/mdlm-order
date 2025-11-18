@@ -558,7 +558,8 @@ def collect_training_data(
                     idx_in_block = torch.argsort(order_2d, dim=-1)   # [B, 4]，值在 0..3
                     # 3) 如果你想要「在原始一维上的 index」，给每个 block 加上偏移
                     offset = (torch.arange(base_len_seg, device=order_b.device) * 4).unsqueeze(1)  # [B, 1]
-                    order_b[s:e] = (idx_in_block + offset).reshape(order_b[s:e].shape)        # [L]
+                    order_res = (idx_in_block + offset).reshape(-1)            # [B*4]
+                    order_b[s:e] = order_res[:seg_len].reshape(order_b[s:e].shape)        # [L]
 
                 rand = torch.randint(low=0, high=4, size=(base_len_seg,), device=input_ids.device)
                 rand_full[s:e] = rand.repeat_interleave(4)[:seg_len]
