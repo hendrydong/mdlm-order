@@ -553,11 +553,13 @@ def collect_training_data(
                     blocks = base[perm].reshape(-1)                        # [K, 4]
                     order_b[s:e] = blocks[:seg_len]
                 elif config.training.method == "ordered":
-                    order_2d = order_b[s:s+base_len_seg*4].view(base_len_seg, 4)      # [B, 4]
+                    order_2d = torch.zeros((base_len_seg * 4), dtype=torch.long, device=order_b.device) + 100
+                    order_2d[:seq_len] = order_b[s:e]
+                    order_2d = order_2d.reshape(base_len_seg, 4)  # [K, 4]
                     # 2) 每个 block 里做一次 argsort
                     idx_in_block = torch.argsort(order_2d, dim=-1)   # [B, 4]，值在 0..3
                     # 3) 如果你想要「在原始一维上的 index」，给每个 block 加上偏移
-                    offset = (torch.arange(base_len_seg, device=order_b.device) * 4).unsqueeze(1)  # [B, 1]
+                    offset = 0 #(torch.arange(base_len_seg, device=order_b.device) * 4).unsqueeze(1)  # [B, 1]
                     order_res = (idx_in_block + offset).reshape(-1)            # [B*4]
                     order_b[s:e] = order_res[:seg_len].reshape(order_b[s:e].shape)        # [L]
 
