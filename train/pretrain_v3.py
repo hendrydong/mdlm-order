@@ -536,41 +536,36 @@ def collect_training_data(
             # order_ids % 4, 
             order_b = order_ids[b, L0:]  # [L1]
             base_len = len(order_b) // 4
-            if config.training.method == "semi-ar":
-                order_b = torch.arange(len(order_b), device=order_b.device)  # [L1]
-            elif config.training.method == "r2l":
-                order_b = torch.arange(len(order_b)-1, -1, -1, device=order_b.device)  # [L1]
-            elif config.training.method == "random":
-                base = torch.tensor([0, 1, 2, 3], device=order_b.device)          # [4]
-                noise = torch.rand(base_len, 4, device=order_b.device)                   # [K, 4]
-                perm = noise.argsort(dim=1)                # [K, 4] 里每行是 0..3 的乱序
-                blocks = base[perm]                        # [K, 4]
-                order_b = blocks.reshape(order_b.shape)   
-            elif config.training.method == "ordered":
-                order_2d = order_b.view(base_len, 4)      # [B, 4]
+            rand_full = torch.zeros(len(order_b), dtype=torch.long, device=input_ids.device)
+            for s, e in _segments_from_labels_1d(segment_ids[b, L0:]):
+                seg_len = e - s
+                base_len_seg = seg_len // 4
+                if seg_len % 4 != 0:
+                    base_len_seg += 1
+                if config.training.method == "semi-ar":
+                    order_b[s:e] = torch.arange(seg_len, device=order_b.device)  # [L1]
+                elif config.training.method == "r2l":
+                    order_b[s:e] = torch.arange(seg_len-1, -1, -1, device=order_b.device)  # [L1]
+                elif config.training.method == "random":
+                    base = torch.tensor([0, 1, 2, 3], device=order_b.device)          # [4]
+                    noise = torch.rand(base_len_seg, 4, device=order_b.device)                   # [K, 4]
+                    perm = noise.argsort(dim=1)                # [K, 4] 里每行是 0..3 的乱序
+                    blocks = base[perm].reshape(-1)                        # [K, 4]
+                    order_b[s:e] = blocks[:seg_len]
+                elif config.training.method == "ordered":
+                    order_2d = order_b[s:s+seg_len].view(base_len_seg, 4)      # [B, 4]
+                    # 2) 每个 block 里做一次 argsort
+                    idx_in_block = torch.argsort(order_2d, dim=-1)   # [B, 4]，值在 0..3
+                    # 3) 如果你想要「在原始一维上的 index」，给每个 block 加上偏移
+                    offset = (torch.arange(base_len_seg, device=order_b.device) * 4).unsqueeze(1)  # [B, 1]
+                    order_b[s:e] = (idx_in_block + offset).reshape(order_b[s:e].shape)        # [L]
 
-                # 2) 每个 block 里做一次 argsort
-                idx_in_block = torch.argsort(order_2d, dim=-1)   # [B, 4]，值在 0..3
-
-                # 3) 如果你想要「在原始一维上的 index」，给每个 block 加上偏移
-                offset = (torch.arange(base_len, device=order_b.device) * 4).unsqueeze(1)  # [B, 1]
-                order_b = (idx_in_block + offset).reshape(order_b.shape)        # [L]
-
-
+                rand = torch.randint(low=0, high=4, size=(base_len_seg,), device=input_ids.device)
+                rand_full[s:e] = rand.repeat_interleave(4)[:seg_len]
+            
             order_mod = order_b % 4
 
-            # 2) random base noise, shape = original_length / 4
-            rand_base = torch.randint(low=0, high=4, size=(base_len,), device=input_ids.device)
-
-            # 3) repeat expand到同长度
-            rand_full = rand_base.repeat_interleave(4)
-
-            # 若原始长度不是4的倍数，补齐
-            if len(rand_full) < len(order_ids):
-                rand_full = torch.cat([rand_full, rand_full[:len(order_ids)-len(rand_full)]])
-            
             pmask_tail = order_mod >= rand_full#torch.ones(L1, dtype=torch.bool, device=input_ids.device)
-            
             
             
             pmask_b = torch.cat([
