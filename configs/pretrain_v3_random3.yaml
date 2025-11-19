@@ -6,7 +6,7 @@ wandb:
 experiment:
     project: "pretrain" # need to be same of this file name 
     num_node: 1 # the number of machines you have
-    name: "pretrain-v3-1118"
+    name: "pretrain-v3-1118-random3"
 
 
 model:
@@ -28,7 +28,7 @@ training:
     seed: 10086
     num_train_epochs: 1
     max_grad_norm: 1
-    method: "ordered" # "semi-ar""trace"
+    method: "random3" # "semi-ar""trace"
     lower_p: 0.1
     upper_p: 0.9
     block_size: 4 # the block size of your model

@@ -530,7 +530,7 @@ def collect_training_data(
     extended_input_ids_list = []
     pmask_list = []
     seg_kept_list = []   # 每条扩展样本左半段对应的 segment_ids（用于生成扩展段 seg）
-    order_list = []
+    pntp_list = []
     if True:
         for b in range(B):
             # order_ids % 4, 
@@ -546,7 +546,7 @@ def collect_training_data(
                     order_b[s:e] = torch.arange(seg_len, device=order_b.device)  # [L1]
                 elif config.training.method == "r2l":
                     order_b[s:e] = torch.arange(seg_len-1, -1, -1, device=order_b.device)  # [L1]
-                elif config.training.method == "random":
+                elif config.training.method in ["random", "random1", "random2", "random3", "random4"]:
                     base = torch.tensor([0, 1, 2, 3], device=order_b.device)          # [4]
                     noise = torch.rand(base_len_seg, 4, device=order_b.device)                   # [K, 4]
                     perm = noise.argsort(dim=1)                # [K, 4] 里每行是 0..3 的乱序
@@ -564,16 +564,32 @@ def collect_training_data(
                     order_b[s:e] = order_res[:seg_len].reshape(order_b[s:e].shape)        # [L]
 
                 rand = torch.randint(low=0, high=4, size=(base_len_seg,), device=input_ids.device)
+                
+                if config.training.method == "random1":
+                    rand = torch.zeros_like(rand)
+                elif config.training.method == "random2":
+                    rand = torch.ones_like(rand) * 1
+                elif config.training.method == "random3":
+                    rand = torch.ones_like(rand) * 2
+                elif config.training.method == "random4":
+                    rand = torch.ones_like(rand) * 3
+                
                 rand_full[s:e] = rand.repeat_interleave(4)[:seg_len]
             
             order_mod = order_b % 4
 
             pmask_tail = order_mod >= rand_full#torch.ones(L1, dtype=torch.bool, device=input_ids.device)
+            pntp = order_mod == rand_full
             
             
             pmask_b = torch.cat([
                 torch.zeros(L0, dtype=torch.bool, device=input_ids.device),
                 pmask_tail
+            ], dim=0)  # [L0+L1]==[L]
+
+            pntp_b = torch.cat([
+                torch.zeros(L0, dtype=torch.bool, device=input_ids.device),
+                pntp
             ], dim=0)  # [L0+L1]==[L]
 
             noise_tail = input_ids[b, L0:].clone()
@@ -584,6 +600,7 @@ def collect_training_data(
 
             extended_input_ids_list.append(extended_b)
             pmask_list.append(pmask_b)
+            pntp_list.append(pntp_b)
             seg_kept_list.append(segment_ids[b])  # 记录下这条样本的段号
     else:
         raise ValueError(f"Unknown training.method: {config.training.method}")
@@ -591,6 +608,7 @@ def collect_training_data(
     # 堆叠
     extended_input_ids = torch.stack(extended_input_ids_list, dim=0)  # [B_eff, 2L]
     p_mask             = torch.stack(pmask_list, dim=0).to(torch.bool)  # [B_eff, L]
+    pntp            = torch.stack(pntp_list, dim=0).to(torch.bool)  # [B_eff, L]
     seg_left           = torch.stack(seg_kept_list, dim=0)  # [B_eff, L]（左半段的段号）
     #tok_idx_ext      = torch.stack(order_list, dim=0)        # [B_eff, L1]
 
@@ -616,11 +634,11 @@ def collect_training_data(
     tok_idx_ext       = tok_idx_ext[keep]
     labels            = labels[keep]
     seg_left          = seg_left[keep]                                 # 方便外面若还需要
-
+    pntp              = pntp[keep]
     # （可选）把扩展段的 seg 也返回，便于在外面构造跨段屏蔽 same_seg
     extended_segment_ids = torch.cat([seg_left, seg_left], dim=1)      # [B_eff, 2L]
 
-    return extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids
+    return extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids, pntp
 
 # 方案 B：HF Dataset.from_generator（注意潜在物化）
 from datasets import Dataset, Features, Sequence, Value
@@ -805,7 +823,7 @@ def main():
             step_map_list = [list(range(input_ids.size(1))) for _ in range(input_ids.size(0))]
 
         with torch.no_grad():
-            extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids = collect_training_data(
+            extended_input_ids, p_mask, tok_idx_ext, labels, keep, extended_segment_ids, pntp = collect_training_data(
                 input_ids=input_ids,
                 step_map_list=step_map_list,
                 start_pos=0,
@@ -855,6 +873,7 @@ def main():
             "tok_idx_ext": tok_idx_ext,                 # [B_eff, N]
             "labels": labels,                           # [B_eff, L]
             "attn_bias": attn_bias,                     # [B_eff,1,N,N]
+            "pntp": pntp,                               # [B_eff, L]
         }
 
 
@@ -914,6 +933,7 @@ def main():
     def forward_process(batch):
         extended_input_ids = batch["extended_input_ids"]
         p_mask = batch["p_mask"]
+        p_ntp = batch["pntp"]
         tok_idx_ext = batch["tok_idx_ext"]
         attn_bias = batch["attn_bias"]
         labels = batch["labels"]
@@ -932,6 +952,8 @@ def main():
 
         log_probs = F.log_softmax(logits, dim=-1)
         logp_tok  = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # [B_eff, L1]
+        if config.training.use_ntp_loss:
+            p_mask = p_mask * p_ntp
         loss_lm = - (logp_tok * p_mask).sum(dim=1) / p_mask.sum(dim=1).clamp_min(1)
         loss_lm = loss_lm.mean()
         return loss_lm

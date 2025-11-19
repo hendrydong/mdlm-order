@@ -38,6 +38,7 @@ training:
     max_prompt_len: 784
     chunk_size: 4096
     save_steps: 1000
+    use_ntp: False
 
 
 
