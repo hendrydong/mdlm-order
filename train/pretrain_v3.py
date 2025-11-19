@@ -952,7 +952,7 @@ def main():
 
         log_probs = F.log_softmax(logits, dim=-1)
         logp_tok  = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # [B_eff, L1]
-        if config.training.use_ntp_loss:
+        if config.training.use_ntp:
             p_mask = p_mask * p_ntp
         loss_lm = - (logp_tok * p_mask).sum(dim=1) / p_mask.sum(dim=1).clamp_min(1)
         loss_lm = loss_lm.mean()
